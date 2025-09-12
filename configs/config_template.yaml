@@ -1,0 +1,38 @@
+data:
+  data_dir: "/path/to/data"
+  scratch_data_dir: "/path/to/data"
+  copy_to_scratch: true
+  tissues: mouse*  # null, string or list of strings (accepts mix of glob patterns and specific names)
+  max_images_per_tissue: null
+  
+splits:
+  train: 0.7
+  val: 0.1
+  test: 0.2
+
+model:
+  model_name: "stardist-nuinsseg"
+  model_dir: "models"
+  n_rays: 32
+  grid: [2, 2]
+  patch_size: [512, 512] # [256, 256]
+
+training:
+  epochs: 400
+  steps_per_epoch: null  # if null calculated as dataset_size / batch_size
+  batch_size: 4
+  learning_rate: 0.0003
+
+wandb:
+  enabled: true
+  project: "stardist-nuinsseg"
+  entity: null
+  run_name: "nuinsseg-mouse" # automatically timestamped
+  tags: ["human-mouse"]
+  log_pred_every_n_epochs: 20
+  num_val_samples_to_log: 4 # number of validation samples to log to wandb media section
+  num_test_samples_to_log: 4 # number of test samples to log to wandb media section
+
+gpu:
+  device: 5
+  memory_limit: null  # memory limit (MB)
