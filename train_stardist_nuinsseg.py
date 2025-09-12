@@ -159,7 +159,7 @@ class NuInsSegDataLoader:
             tissue_dir = self.data_dir / tissue
             
             img_dir = tissue_dir / "tissue images"
-            lbl_dir = tissue_dir / "label masks"
+            lbl_dir = tissue_dir / "label masks modify"
             
             if not (img_dir.exists() and lbl_dir.exists()):
                 print(f"Warning: Missing directories for tissue {tissue}, skipping...")
