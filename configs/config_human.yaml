@@ -1,0 +1,38 @@
+data:
+  data_dir: "/g/kreshuk/wies/data/NuInsSeg"
+  scratch_data_dir: "/scratch/wies/data"
+  copy_to_scratch: true
+  tissues: human*  # Only human tissues
+  max_images_per_tissue: null
+  use_fixed_test_sets: true  # Fixed human_test & mouse_test sets for comparison
+  
+splits:
+  train: 0.8  # After removing fixed test sets
+  val: 0.2    # After removing fixed test sets
+
+model:
+  model_name: "stardist-nuinsseg-human"
+  model_dir: "models"
+  n_rays: 32
+  grid: [2, 2]
+  patch_size: [512, 512]
+
+training:
+  epochs: 400
+  steps_per_epoch: null
+  batch_size: 4
+  learning_rate: 0.0003
+
+wandb:
+  enabled: true
+  project: "stardist-nuinsseg"
+  entity: null
+  run_name: "nuinsseg-human"
+  tags: ["human"]
+  log_pred_every_n_epochs: 20
+  num_val_samples_to_log: 4
+  num_test_samples_to_log: 4
+
+gpu:
+  device: 5
+  memory_limit: null

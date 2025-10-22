@@ -1,6 +1,6 @@
 data:
-  data_dir: "/path/to/data"
-  scratch_data_dir: "/path/to/data"
+  data_dir: "/g/kreshuk/wies/data/NuInsSeg"
+  scratch_data_dir: "/scratch/wies/data"
   copy_to_scratch: true
   tissues: mouse*  # null, string or list of strings (accepts mix of glob patterns and specific names)
   max_images_per_tissue: null
@@ -9,7 +9,7 @@ data:
 splits:
   train: 0.8
   val: 0.2
-  # test: 0.2
+  # test: 0.2 # only used when use_fixed_test_sets: false (legacy mode)
 
 model:
   model_name: "stardist-nuinsseg"
@@ -20,7 +20,7 @@ model:
 
 training:
   epochs: 400
-  steps_per_epoch: null  # if null calculated as dataset_size / batch_size
+  steps_per_epoch: null  # null = dataset_size / batch_size
   batch_size: 4
   learning_rate: 0.0003
 
@@ -29,10 +29,10 @@ wandb:
   project: "stardist-nuinsseg"
   entity: null
   run_name: "nuinsseg-mouse" # automatically timestamped
-  tags: ["human-mouse"]
+  tags: ["mouse"]
   log_pred_every_n_epochs: 20
-  num_val_samples_to_log: 4 # number of validation samples to log to wandb media section
-  num_test_samples_to_log: 4 # number of test samples to log to wandb media section
+  num_val_samples_to_log: 4
+  num_test_samples_to_log: 4
 
 gpu:
   device: 5
