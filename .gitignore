@@ -209,3 +209,4 @@ __marimo__/
 # Project specific ignores
 models/
 wandb/
+test_configs/
