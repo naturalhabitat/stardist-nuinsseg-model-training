@@ -414,19 +414,84 @@ class StarDistTrainer:
         self.history = None
         
     def prepare_data(self, dataset: NuInsSegDataLoader, 
-                    train_split: float = 0.7, val_split: float = 0.15, test_split: float = 0.15) -> Tuple[List, List, List, List, List, List]:
+                    train_split: float = 0.7, val_split: float = 0.3, test_split: float = 0.0, 
+                    use_fixed_test_sets: bool = True) -> Tuple[List, List, List, List, List, List]:
         """
-        Prepare training, validation, and test data with 3-way split
+        Prepare training, validation, and test data with fixed test sets or traditional 3-way split
         
         Args:
             dataset: NuInsSegDataLoader instance
-            train_split: Fraction of data to use for training
-            val_split: Fraction of data to use for validation
-            test_split: Fraction of data to use for testing
+            train_split: Fraction of remaining data to use for training (after fixed test sets)
+            val_split: Fraction of remaining data to use for validation (after fixed test sets)
+            test_split: Fraction for test (only used if use_fixed_test_sets=False)
+            use_fixed_test_sets: Whether to use fixed test sets (independent of tissue filter)
             
         Returns:
             Tuple of (X_train, Y_train, X_val, Y_val, X_test, Y_test)
+            - If use_fixed_test_sets=True: X_test, Y_test contain human_test + mouse_test
+            - If use_fixed_test_sets=False: traditional random split
         """
+        if use_fixed_test_sets:
+            return self._prepare_data_with_fixed_test_sets(dataset, train_split, val_split)
+        else:
+            return self._prepare_data_traditional_split(dataset, train_split, val_split, test_split)
+    
+    def _prepare_data_with_fixed_test_sets(self, dataset: NuInsSegDataLoader, 
+                                          train_split: float, val_split: float) -> Tuple[List, List, List, List, List, List]:
+        """
+        Prepare data with fixed test sets: independent human_test and mouse_test
+        These test sets are consistent regardless of the tissue filter parameter.
+        """
+        print("\n=== Creating Fixed Test Sets ===")
+        
+        # Create fixed test sets (independent of tissue parameter)
+        human_test_indices, mouse_test_indices = self._create_fixed_test_sets(dataset)
+        all_test_indices = human_test_indices + mouse_test_indices
+        
+        # Remove test indices from available data for train/val split
+        all_indices = set(range(len(dataset)))
+        remaining_indices = list(all_indices - set(all_test_indices))
+        
+        print(f"\nFixed test sets created:")
+        print(f"- Human test: {len(human_test_indices)} samples")
+        print(f"- Mouse test: {len(mouse_test_indices)} samples")
+        print(f"- Total test: {len(all_test_indices)} samples")
+        print(f"- Remaining for train/val: {len(remaining_indices)} samples")
+        
+        # Split remaining data into train and validation
+        if abs(train_split + val_split - 1.0) > 1e-6:
+            raise ValueError(f"train_split + val_split must sum to 1.0, got {train_split + val_split}")
+        
+        n_train = int(train_split * len(remaining_indices))
+        n_val = len(remaining_indices) - n_train
+        
+        # Use deterministic split for reproducibility
+        rng = np.random.RandomState(42)
+        shuffled_remaining = rng.permutation(remaining_indices)
+        
+        train_indices = shuffled_remaining[:n_train].tolist()
+        val_indices = shuffled_remaining[n_train:].tolist()
+        
+        # Extract data subsets
+        X_train_raw, Y_train_raw, train_file_paths = dataset.get_subset(train_indices)
+        X_val_raw, Y_val_raw, val_file_paths = dataset.get_subset(val_indices)
+        X_test_raw, Y_test_raw, test_file_paths = dataset.get_subset(all_test_indices)
+        
+        # Store file paths and test set information
+        self.train_file_paths = train_file_paths
+        self.val_file_paths = val_file_paths
+        self.test_file_paths = test_file_paths
+        self.human_test_indices = human_test_indices
+        self.mouse_test_indices = mouse_test_indices
+        
+        return self._normalize_and_process_data(
+            X_train_raw, Y_train_raw, X_val_raw, Y_val_raw, X_test_raw, Y_test_raw,
+            len(dataset), train_indices, val_indices, all_test_indices
+        )
+    
+    def _prepare_data_traditional_split(self, dataset: NuInsSegDataLoader, 
+                                       train_split: float, val_split: float, test_split: float) -> Tuple[List, List, List, List, List, List]:
+        """Traditional random 3-way split (original behavior)"""
         total_samples = len(dataset)
         
         if abs(train_split + val_split + test_split - 1.0) > 1e-6:
@@ -439,18 +504,71 @@ class StarDistTrainer:
         rng = np.random.RandomState(42)
         indices = rng.permutation(total_samples)
         
-        train_indices = indices[:n_train]
-        val_indices = indices[n_train:n_train + n_val]
-        test_indices = indices[n_train + n_val:]
+        train_indices = indices[:n_train].tolist()
+        val_indices = indices[n_train:n_train + n_val].tolist()
+        test_indices = indices[n_train + n_val:].tolist()
         
-        X_train_raw, Y_train_raw, train_file_paths = dataset.get_subset(train_indices.tolist())
-        X_val_raw, Y_val_raw, val_file_paths = dataset.get_subset(val_indices.tolist())
-        X_test_raw, Y_test_raw, test_file_paths = dataset.get_subset(test_indices.tolist())
+        X_train_raw, Y_train_raw, train_file_paths = dataset.get_subset(train_indices)
+        X_val_raw, Y_val_raw, val_file_paths = dataset.get_subset(val_indices)
+        X_test_raw, Y_test_raw, test_file_paths = dataset.get_subset(test_indices)
         
         self.train_file_paths = train_file_paths
         self.val_file_paths = val_file_paths
         self.test_file_paths = test_file_paths
         
+        return self._normalize_and_process_data(
+            X_train_raw, Y_train_raw, X_val_raw, Y_val_raw, X_test_raw, Y_test_raw,
+            total_samples, train_indices, val_indices, test_indices
+        )
+    
+    def _create_fixed_test_sets(self, dataset: NuInsSegDataLoader) -> Tuple[List[int], List[int]]:
+        """
+        Create fixed test sets with max 1% of images per tissue folder.
+        Returns indices for human test set and mouse test set.
+        """
+        # Group indices by tissue type
+        tissue_to_indices = {}
+        for idx, file_info in enumerate(dataset.file_paths):
+            tissue = file_info['tissue']
+            if tissue not in tissue_to_indices:
+                tissue_to_indices[tissue] = []
+            tissue_to_indices[tissue].append(idx)
+        
+        # Separate human and mouse tissues
+        human_tissues = [tissue for tissue in tissue_to_indices.keys() if tissue.lower().startswith('human')]
+        mouse_tissues = [tissue for tissue in tissue_to_indices.keys() if tissue.lower().startswith('mouse')]
+        
+        print(f"\nDetected tissues:")
+        print(f"- Human tissues ({len(human_tissues)}): {human_tissues}")
+        print(f"- Mouse tissues ({len(mouse_tissues)}): {mouse_tissues}")
+        
+        # Create test sets with max 1% per tissue (minimum 1 image)
+        rng = np.random.RandomState(123)  # Different seed for test set creation
+        
+        def select_test_images(tissues, tissue_to_indices):
+            test_indices = []
+            for tissue in tissues:
+                indices = tissue_to_indices[tissue]
+                n_images = len(indices)
+                n_test = max(1, int(np.ceil(n_images * 0.01)))  # At least 1 image, max 1%
+                
+                # Shuffle and select
+                shuffled_indices = rng.permutation(indices)
+                selected = shuffled_indices[:n_test].tolist()
+                test_indices.extend(selected)
+                
+                print(f"  {tissue}: {n_test}/{n_images} images selected for test set")
+            
+            return test_indices
+        
+        human_test_indices = select_test_images(human_tissues, tissue_to_indices)
+        mouse_test_indices = select_test_images(mouse_tissues, tissue_to_indices)
+        
+        return human_test_indices, mouse_test_indices
+    
+    def _normalize_and_process_data(self, X_train_raw, Y_train_raw, X_val_raw, Y_val_raw, X_test_raw, Y_test_raw,
+                                   total_samples, train_indices, val_indices, test_indices):
+        """Normalize images and fill label holes"""
         print("\nNormalizing images...")
         axis_norm = (0, 1)
         
@@ -737,6 +855,101 @@ class StarDistTrainer:
         
         test_viz_callback.log_predictions("Final")
     
+    def evaluate_separate_test_sets(self, X_test: List[np.ndarray], Y_test: List[np.ndarray], 
+                                   iou_thresholds: List[float] = None) -> Dict[str, Any]:
+        """
+        Evaluate model on separate human and mouse test sets
+        
+        Args:
+            X_test: Combined test images (human + mouse)
+            Y_test: Combined test labels (human + mouse)
+            iou_thresholds: IoU thresholds for evaluation
+            
+        Returns:
+            Dictionary containing evaluation results for human_test, mouse_test, and combined
+        """
+        if iou_thresholds is None:
+            iou_thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        
+        if not hasattr(self, 'human_test_indices') or not hasattr(self, 'mouse_test_indices'):
+            print("Warning: No fixed test set indices found. Running evaluation on combined test set only.")
+            stats, Y_pred = self.evaluate(X_test, Y_test, iou_thresholds, data_type="test")
+            return {"combined_test": {"stats": stats, "predictions": Y_pred}}
+        
+        # Split test data back into human and mouse components
+        human_start_idx = 0
+        human_end_idx = len(self.human_test_indices)
+        mouse_start_idx = human_end_idx
+        mouse_end_idx = len(X_test)
+        
+        X_human_test = X_test[human_start_idx:human_end_idx]
+        Y_human_test = Y_test[human_start_idx:human_end_idx]
+        
+        X_mouse_test = X_test[mouse_start_idx:mouse_end_idx]
+        Y_mouse_test = Y_test[mouse_start_idx:mouse_end_idx]
+        
+        results = {}
+        
+        # Evaluate on human test set
+        if len(X_human_test) > 0:
+            print(f"\n=== Evaluating on Human Test Set ({len(X_human_test)} samples) ===")
+            human_stats, human_pred = self.evaluate(X_human_test, Y_human_test, iou_thresholds, 
+                                                   data_type="human_test")
+            results["human_test"] = {"stats": human_stats, "predictions": human_pred}
+        
+        # Evaluate on mouse test set
+        if len(X_mouse_test) > 0:
+            print(f"\n=== Evaluating on Mouse Test Set ({len(X_mouse_test)} samples) ===")
+            mouse_stats, mouse_pred = self.evaluate(X_mouse_test, Y_mouse_test, iou_thresholds, 
+                                                   data_type="mouse_test")
+            results["mouse_test"] = {"stats": mouse_stats, "predictions": mouse_pred}
+        
+        # Evaluate on combined test set
+        print(f"\n=== Evaluating on Combined Test Set ({len(X_test)} samples) ===")
+        combined_stats, combined_pred = self.evaluate(X_test, Y_test, iou_thresholds, 
+                                                     data_type="combined_test")
+        results["combined_test"] = {"stats": combined_stats, "predictions": combined_pred}
+        
+        # Log comparative results to wandb
+        if WANDB_AVAILABLE and wandb.run is not None:
+            self._log_comparative_results(results, iou_thresholds)
+        
+        return results
+    
+    def _log_comparative_results(self, results: Dict[str, Any], iou_thresholds: List[float]):
+        """Log comparative results between human and mouse test sets to wandb"""
+        # Extract metrics at IoU=0.5 for comparison
+        iou_05_idx = iou_thresholds.index(0.5) if 0.5 in iou_thresholds else len(iou_thresholds) // 2
+        
+        comparison_data = []
+        
+        for test_set_name, data in results.items():
+            if len(data["stats"]) > iou_05_idx:
+                stat = data["stats"][iou_05_idx]
+                comparison_data.append([
+                    test_set_name,
+                    stat.precision,
+                    stat.recall,
+                    stat.f1,
+                    stat.accuracy
+                ])
+        
+        if comparison_data:
+            comparison_table = wandb.Table(
+                columns=["Test Set", "Precision", "Recall", "F1", "Accuracy"],
+                data=comparison_data
+            )
+            
+            wandb.log({
+                "evaluation/test_set_comparison": comparison_table,
+                "evaluation/test_set_comparison_bar": wandb.plot.bar(
+                    comparison_table, 
+                    "Test Set", 
+                    "F1",
+                    title="Model Performance Comparison Across Test Sets (IoU=0.5)"
+                )
+            })
+    
     def evaluate(self, X_data: List[np.ndarray], Y_data: List[np.ndarray], 
                  iou_thresholds: List[float] = None, data_type: str = "validation"):
         """Evaluate model performance"""
@@ -952,14 +1165,32 @@ def train_from_config(config_path: str):
         model_config['model_dir']
     )
     
-    # Prepare data with 3-way split
-    split_config = data_config.get('splits', {'train': 0.7, 'val': 0.15, 'test': 0.15})
-    X_train, Y_train, X_val, Y_val, X_test, Y_test = trainer.prepare_data(
-        dataset, 
-        train_split=split_config['train'],
-        val_split=split_config['val'],
-        test_split=split_config['test']
-    )
+    # Prepare data with fixed test sets or traditional split
+    split_config = data_config.get('splits', {'train': 0.7, 'val': 0.3})
+    use_fixed_test_sets = data_config.get('use_fixed_test_sets', True)
+    
+    if use_fixed_test_sets:
+        print("\n=== Using Fixed Test Sets Strategy ===")
+        X_train, Y_train, X_val, Y_val, X_test, Y_test = trainer.prepare_data(
+            dataset, 
+            train_split=split_config['train'],
+            val_split=split_config['val'],
+            use_fixed_test_sets=True
+        )
+    else:
+        print("\n=== Using Traditional Random Split ===")
+        # For backward compatibility
+        test_split = split_config.get('test', 0.15)
+        train_split = split_config['train']
+        val_split = split_config['val'] if 'val' in split_config else 1.0 - train_split - test_split
+        
+        X_train, Y_train, X_val, Y_val, X_test, Y_test = trainer.prepare_data(
+            dataset, 
+            train_split=train_split,
+            val_split=val_split,
+            test_split=test_split,
+            use_fixed_test_sets=False
+        )
     
     # Get wandb configuration
     wandb_config = config.get('wandb', {})
@@ -999,9 +1230,27 @@ def train_from_config(config_path: str):
     print("\nEvaluating model on validation data...")
     trainer.evaluate(X_val, Y_val, data_type="validation")
     
-    # Evaluate model on test data (final evaluation)
-    print("Evaluating model on test data...")
-    trainer.evaluate(X_test, Y_test, data_type="test")
+    # Evaluate model on test data (final evaluation with separate test sets if using fixed test sets)
+    if use_fixed_test_sets:
+        print("\n" + "="*60)
+        print("FINAL EVALUATION - Fixed Test Sets Strategy")
+        print("="*60)
+        test_results = trainer.evaluate_separate_test_sets(X_test, Y_test)
+        
+        # Print summary
+        print(f"\n=== FINAL TEST RESULTS SUMMARY ===")
+        for test_set_name, data in test_results.items():
+            if len(data["stats"]) > 4:  # IoU=0.5 is usually at index 4
+                stat_05 = data["stats"][4]
+                print(f"{test_set_name.upper()}:")
+                print(f"  Precision: {stat_05.precision:.3f}")
+                print(f"  Recall:    {stat_05.recall:.3f}")
+                print(f"  F1:        {stat_05.f1:.3f}")
+                print(f"  Accuracy:  {stat_05.accuracy:.3f}")
+                print()
+    else:
+        print("Evaluating model on test data...")
+        trainer.evaluate(X_test, Y_test, data_type="test")
     
     if wandb_config.get('enabled', True) and WANDB_AVAILABLE and wandb.run is not None:
         wandb.finish()

@@ -30,7 +30,10 @@ The script automatically handles dataset location and optional copying:
 
 ## Configuration
 
-Edit `config_template.yaml` to customize your training:
+Edit configuration files (`config_template.yaml`) to customize your training. The system now supports **Fixed Test Sets Strategy** for comparative studies:
+
+
+### Fixed Test Sets Strategy (Recommended for Model Comparison)
 
 ```yaml
 data:
@@ -39,11 +42,12 @@ data:
   copy_to_scratch: true
   tissues: mouse*  # null, string or list of strings (accepts mix of glob patterns and specific names)
   max_images_per_tissue: null
+  use_fixed_test_sets: true  # use fixed human_test & mouse_test sets
   
 splits:
-  train: 0.7
-  val: 0.1
-  test: 0.2
+  train: 0.8
+  val: 0.2
+  # test: 0.2 # only used when use_fixed_test_sets: false (legacy mode)
 
 model:
   model_name: "stardist-nuinsseg"
@@ -70,12 +74,55 @@ wandb:
 
 gpu:
   device: 5
-  memory_limit: null  # memory limit (MB)
+  memory_limit: null # memory limit (MB)
 ```
 
+### How Fixed Test Sets Work
+
+1. **Fixed Test Set Creation**: 
+   - Creates `human_test`: ~1% of images from each human tissue folder (min 1 image)
+   - Creates `mouse_test`: ~1% of images from each mouse tissue folder (min 1 image)
+   - These test sets are **consistent across all training runs**
+
+2. **Training Data Selection**:
+   - Removes fixed test images from available pool
+   - Applies `tissues` filter to remaining data for train/val split
+   - Enables fair comparison between models trained on different tissue subsets
+
+3. **Evaluation**:
+   - All models evaluated on same `human_test` and `mouse_test` sets
+   - Separate metrics reported for human, mouse, and combined performance
+
+
+### Example Training Scenarios
+
+```bash
+# Train on all tissues, test on both human and mouse
+python train_stardist_nuinsseg.py configs/config_all_tissues.yaml
+
+# Train on human tissues only, test on both human and mouse  
+python train_stardist_nuinsseg.py configs/config_human_only.yaml
+
+# Train on mouse tissues only, test on both human and mouse
+python train_stardist_nuinsseg.py configs/config_mouse_only.yaml
+```
+
+### Legacy Mode (Traditional Random Split)
+
+For backward compatibility, set `use_fixed_test_sets: false`:
+
+```yaml
+data:
+  use_fixed_test_sets: false
+splits:
+  train: 0.7
+  val: 0.15
+  test: 0.15  # Required when use_fixed_test_sets: false
+```
 
 ## Features
 
+- **Fixed Test Sets Strategy**: Consistent human/mouse test sets for model comparison
 - **YAML Configuration**: Training parameters configured via YAML files
 - **Automatic Dataset Management**: Finds and copies dataset from scratch drives
 - **Data Loading**: Automatic loading and preprocessing of NuInsSeg dataset
@@ -84,4 +131,4 @@ gpu:
 - **Checkpointing**: Automatic model checkpointing during training
 - **Early Stopping**: Prevents overfitting with early stopping
 - **Threshold Optimization**: Automatic optimization of thresholds for NMS postprocessing
-- **Model Evaluation**: Evaluation via IoU metrics and additional Media logging
+- **Comparative Evaluation**: Separate metrics for human, mouse, and combined test performance
