@@ -87,10 +87,13 @@ class NuInsSegDataLoader:
         all_tissues = [d.name for d in self.data_dir.iterdir() 
                       if d.is_dir() and 'zip' not in d.name.lower()]
         
-        self.tissue_types = self._resolve_tissue_patterns(tissue_types, all_tissues)
+        # Store requested tissues but always load all tissues for consistent test sets
+        self.requested_tissues = self._resolve_tissue_patterns(tissue_types, all_tissues)
+        self.tissue_types = all_tissues  # Always load all tissues
             
         print(f"\nAvailable tissues ({len(all_tissues)}): \n{sorted(all_tissues)}")
-        print(f"\nSelected tissues ({len(self.tissue_types)}): \n{sorted(self.tissue_types)}\n")
+        print(f"\nRequested tissues ({len(self.requested_tissues)}): \n{sorted(self.requested_tissues)}")
+        print(f"Loading all tissues for consistent split test set strategy\n")
         
         self.images, self.labels, self.file_paths = self._load_all_data()
         print(f"\nDataset initialized with {len(self.images)} image-label pairs")
@@ -256,6 +259,22 @@ class NuInsSegDataLoader:
         if dataset_index >= len(self.file_paths):
             raise IndexError(f"Index {dataset_index} out of range for dataset of size {len(self.file_paths)}")
         return self.file_paths[dataset_index]
+    
+    def get_tissue_filtered_indices(self) -> List[int]:
+        """
+        Return indices for samples matching requested tissues
+        
+        Returns:
+            List of indices for samples from requested tissues
+        """
+        if self.requested_tissues is None:
+            return list(range(len(self.images)))  # All indices if no filter
+        
+        filtered_indices = []
+        for idx, file_info in enumerate(self.file_paths):
+            if file_info['tissue'] in self.requested_tissues:
+                filtered_indices.append(idx)
+        return filtered_indices
     
     def get_subset(self, indices: List[int]) -> Tuple[List[np.ndarray], List[np.ndarray], List[Dict]]:
         """
@@ -444,19 +463,22 @@ class StarDistTrainer:
         """
         print("\n=== Creating Fixed Test Sets ===")
         
-        # Create fixed test sets (independent of tissue parameter)
+        # Create fixed test sets from complete dataset (all tissues)
         human_test_indices, mouse_test_indices = self._create_fixed_test_sets(dataset)
         all_test_indices = human_test_indices + mouse_test_indices
         
-        # Remove test indices from available data for train/val split
-        all_indices = set(range(len(dataset)))
-        remaining_indices = list(all_indices - set(all_test_indices))
+        # Get indices for tissues specified in config
+        tissue_filtered_indices = dataset.get_tissue_filtered_indices()
+        print(f"\nTissue-filtered samples: {len(tissue_filtered_indices)} out of {len(dataset)} total")
+        
+        # Remove test indices from filtered indices for train/val split
+        remaining_indices = list(set(tissue_filtered_indices) - set(all_test_indices))
         
         print(f"\nFixed test sets created:")
         print(f"- Human test: {len(human_test_indices)} samples")
         print(f"- Mouse test: {len(mouse_test_indices)} samples")
         print(f"- Total test: {len(all_test_indices)} samples")
-        print(f"- Remaining for train/val: {len(remaining_indices)} samples")
+        print(f"- Remaining filtered samples for train/val: {len(remaining_indices)} samples")
         
         # Split remaining data into train and validation
         if abs(train_split + val_split - 1.0) > 1e-6:
@@ -484,9 +506,13 @@ class StarDistTrainer:
         self.human_test_indices = human_test_indices
         self.mouse_test_indices = mouse_test_indices
         
+        # For percentage calculations, use the filtered dataset size for train/val,
+        # but total dataset size for test (since test includes all tissues)
+        filtered_size = len(tissue_filtered_indices)
+        
         return self._normalize_and_process_data(
             X_train_raw, Y_train_raw, X_val_raw, Y_val_raw, X_test_raw, Y_test_raw,
-            len(dataset), train_indices, val_indices, all_test_indices
+            len(dataset), filtered_size, train_indices, val_indices, all_test_indices
         )
     
     def _prepare_data_traditional_split(self, dataset: NuInsSegDataLoader, 
@@ -518,7 +544,7 @@ class StarDistTrainer:
         
         return self._normalize_and_process_data(
             X_train_raw, Y_train_raw, X_val_raw, Y_val_raw, X_test_raw, Y_test_raw,
-            total_samples, train_indices, val_indices, test_indices
+            total_samples, total_samples, train_indices, val_indices, test_indices
         )
     
     def _create_fixed_test_sets(self, dataset: NuInsSegDataLoader) -> Tuple[List[int], List[int]]:
@@ -539,12 +565,13 @@ class StarDistTrainer:
         mouse_tissues = [tissue for tissue in tissue_to_indices.keys() if tissue.lower().startswith('mouse')]
         
         print(f"\nDetected tissues:")
-        print(f"- Human tissues ({len(human_tissues)}): {human_tissues}")
-        print(f"- Mouse tissues ({len(mouse_tissues)}): {mouse_tissues}")
+        print(f"- Human tissues ({len(human_tissues)}): \n{human_tissues}")
+        print(f"- Mouse tissues ({len(mouse_tissues)}): \n{mouse_tissues}")
         
         # Create test sets with max 1% per tissue (minimum 1 image)
         rng = np.random.RandomState(123)  # Different seed for test set creation
         
+        print("\nSelecting test images per tissue:")
         def select_test_images(tissues, tissue_to_indices):
             test_indices = []
             for tissue in tissues:
@@ -557,7 +584,7 @@ class StarDistTrainer:
                 selected = shuffled_indices[:n_test].tolist()
                 test_indices.extend(selected)
                 
-                print(f"  {tissue}: {n_test}/{n_images} images selected for test set")
+                print(f"  {tissue}: {n_test}/{n_images}")
             
             return test_indices
         
@@ -567,7 +594,7 @@ class StarDistTrainer:
         return human_test_indices, mouse_test_indices
     
     def _normalize_and_process_data(self, X_train_raw, Y_train_raw, X_val_raw, Y_val_raw, X_test_raw, Y_test_raw,
-                                   total_samples, train_indices, val_indices, test_indices):
+                                   total_samples, filtered_samples, train_indices, val_indices, test_indices):
         """Normalize images and fill label holes"""
         print("\nNormalizing images...")
         axis_norm = (0, 1)
@@ -583,9 +610,10 @@ class StarDistTrainer:
         
         print(f'\nDataset split summary:')
         print(f'- Total samples:      {total_samples}')
-        print(f'- Training:           {len(X_train)} ({len(X_train)/total_samples:.1%})')
-        print(f'- Validation:         {len(X_val)} ({len(X_val)/total_samples:.1%})')
-        print(f'- Test:               {len(X_test)} ({len(X_test)/total_samples:.1%})\n')
+        print(f'- Filtered samples:   {filtered_samples}')
+        print(f'- Training:           {len(X_train)} ({len(X_train)/filtered_samples:.1%} of filtered)')
+        print(f'- Validation:         {len(X_val)} ({len(X_val)/filtered_samples:.1%} of filtered)')
+        print(f'- Test:               {len(X_test)} ({len(X_test)/total_samples:.1%} of total)\n')
         
         return X_train, Y_train, X_val, Y_val, X_test, Y_test
     
@@ -1282,4 +1310,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # train_from_config(Path(__file__).parent / "configs/test_configs/config_test.yaml")
+    # train_from_config(Path(__file__).parent / "configs/config_human_mouse.yaml")
